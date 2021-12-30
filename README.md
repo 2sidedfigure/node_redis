@@ -1,27 +1,56 @@
 redis - a node.js redis client
 ===========================
 
-This is a complete Redis client for node.js.  It supports all Redis commands, including MULTI, WATCH, and PUBLISH/SUBSCRIBE.
+This is a complete Redis client for node.js.  It supports all Redis commands, including many recently added commands like EVAL from
+experimental Redis server branches.
+
 
 Install with:
 
     npm install redis
     
-For portability, a pure JavaScript reply parser is used by default.  Pieter Noordhuis has provided a binding to the
-official `hiredis` C library, which is non-blocking and fast.  To use `hiredis`, do:
+Pieter Noordhuis has provided a binding to the official `hiredis` C library, which is non-blocking and fast.  To use `hiredis`, do:
 
     npm install hiredis redis
-    
-If `hiredis` is installed, `node_redis` will use it by default.
+
+If `hiredis` is installed, `node_redis` will use it by default.  Otherwise, a pure JavaScript parser will be used.
+
+If you use `hiredis`, be sure to rebuild it whenever you upgrade your version of node.  There are mysterious failures that can
+happen between node and native code modules after a node upgrade.
 
 
-## Why so many Redis clients for node?
+## Usage
 
-`node_redis` works in the latest versions of node, is published in `npm`, is used by many people, and is in production on a
-number of sites.
+Simple example, included as `examples/simple.js`:
 
-`node_redis` was originally written to replace `node-redis-client` which hasn't been updated in a while, and no longer works
-with recent versions of node.
+    var redis = require("redis"),
+        client = redis.createClient();
+
+    client.on("error", function (err) {
+        console.log("Error " + err);
+    });
+
+    client.set("string key", "string val", redis.print);
+    client.hset("hash key", "hashtest 1", "some value", redis.print);
+    client.hset(["hash key", "hashtest 2", "some other value"], redis.print);
+    client.hkeys("hash key", function (err, replies) {
+        console.log(replies.length + " replies:");
+        replies.forEach(function (reply, i) {
+            console.log("    " + i + ": " + reply);
+        });
+        client.quit();
+    });
+
+This will display:
+
+    mjr:~/work/node_redis (master)$ node example.js
+    Reply: OK
+    Reply: 0
+    Reply: 0
+    2 replies:
+        0: hashtest 1
+        1: hashtest 2
+    mjr:~/work/node_redis (master)$ 
 
 
 ## Performance
@@ -49,40 +78,7 @@ hiredis parser:
     LRANGE (10 elements): 20000 ops 36563.07 ops/sec 1/8/1.363
     LRANGE (100 elements): 20000 ops 21834.06 ops/sec 0/9/2.287
 
-The performance of `node_redis` improves dramatically with pipelining.
-
-## Usage
-
-Simple example, included as `example.js`:
-
-    var redis = require("redis"),
-        client = redis.createClient();
-
-    client.on("error", function (err) {
-        console.log("Error " + err);
-    });
-
-    client.set("string key", "string val", redis.print);
-    client.hset("hash key", "hashtest 1", "some value", redis.print);
-    client.hset(["hash key", "hashtest 2", "some other value"], redis.print);
-    client.hkeys("hash key", function (err, replies) {
-        console.log(replies.length + " replies:");
-        replies.forEach(function (reply, i) {
-            console.log("    " + i + ": " + reply);
-        });
-        client.quit();
-    });
-
-This will display:
-
-    mjr:~/work/node_redis (master)$ node example.js 
-    Reply: OK
-    Reply: 0
-    Reply: 0
-    2 replies:
-        0: hashtest 1
-        1: hashtest 2
-    mjr:~/work/node_redis (master)$ 
+The performance of `node_redis` improves dramatically with pipelining, which happens automatically in most normal programs.
 
 
 ### Sending Commands
@@ -103,7 +99,7 @@ Note that in either form the `callback` is optional:
     client.set("some key", "some val");
     client.set(["some other key", "some val"]);
 
-For a list of Redis commands, see [Redis Command Reference](http://code.google.com/p/redis/wiki/CommandReference)
+For a list of Redis commands, see [Redis Command Reference](http://redis.io/commands)
 
 The commands can be specified in uppercase or lowercase for convenience.  `client.get()` is the same as `client.GET()`.
 
@@ -117,11 +113,17 @@ JavaScript Array of node Buffers.  `HGETALL` returns an Object with Buffers keye
 
 `client` will emit some events about the state of the connection to the Redis server.
 
+### "ready"
+
+`client` will emit `ready` a connection is established to the Redis server and the server reports 
+that it is ready to receive commands.  Commands issued before the `ready` event are queued, 
+then replayed just before this event is emitted.
+
 ### "connect"
 
-`client` will emit `connect` when a connection is established to the Redis server.
-
-Commands issued before the `connect` event are queued, then replayed when a connection is established.
+`client` will emit `connect` at the same time as it emits `ready` unless `client.options.no_ready_check`
+is set.  If this options is set, `connect` will be emitted when the stream is connected, and then
+you are free to try to send commands.
 
 ### "error"
 
@@ -168,12 +170,48 @@ to `127.0.0.1`.  If you have `redis-server` running on the same computer as node
 port and host are probably fine.  `options` in an object with the following possible properties:
 
 * `parser`: which Redis protocol reply parser to use.  Defaults to `hiredis` if that module is installed.
-            This may also be set to `javascript`.
-* `return_buffers`: defaults to false.  If set to `true`, then bulk data replies will be returned as node Buffer
-                    objects instead of JavaScript Strings.
+This may also be set to `javascript`.
+* `return_buffers`: defaults to `false`.  If set to `true`, then all replies will be sent to callbacks as node Buffer
+objects instead of JavaScript Strings.
+* `detect_buffers`: default to `false`. If set to `true`, then replies will be sent to callbacks as node Buffer objects
+if any of the input arguments to the original command were Buffer objects.
+This option lets you switch between Buffers and Strings on a per-command basis, whereas `return_buffers` applies to
+every command on a client.
+* `socket_nodelay`: defaults to `true`. Whether to call setNoDelay() on the TCP stream, which disables the
+Nagle algorithm on the underlying socket.  Setting this option to `false` can result in additional throughput at the 
+cost of more latency.  Most applications will want this set to `true`.
+* `no_ready_check`: defaults to `false`. When a connection is established to the Redis server, the server might still
+be loading the database from disk.  While loading, the server not respond to any commands.  To work around this, 
+`node_redis` has a "ready check" which sends the `INFO` command to the server.  The response from the `INFO` command
+indicates whether the server is ready for more commands.  When ready, `node_redis` emits a `ready` event.
+Setting `no_ready_check` to `true` will inhibit this check.
+
+
+    var redis = require("redis"),
+        client = redis.createClient(null, null, {detect_buffers: true});
+
+    client.set("foo_rand000000000000", "OK");
+
+    // This will return a JavaScript String
+    client.get("foo_rand000000000000", function (err, reply) {
+        console.log(reply.toString()); // Will print `OK`
+    });
+
+    // This will return a Buffer since original key is specified as a Buffer
+    client.get(new Buffer("foo_rand000000000000"), function (err, reply) {
+        console.log(reply.toString()); // Will print `<Buffer 4f 4b>`
+    });
+    client.end();
 
 `createClient()` returns a `RedisClient` object that is named `client` in all of the examples here.
 
+## client.auth(password, callback)
+
+When connecting to Redis servers that require authentication, the `AUTH` command must be sent as the
+first command after connecting.  This can be tricky to coordinate with reconnections, the ready check,
+etc.  To make this easier, `client.auth()` stashes `password` and will send it after each connection,
+including reconnections.  `callback` is invoked only once, after the response to the very first
+`AUTH` command sent.
 
 ## client.end()
 
@@ -194,6 +232,45 @@ want to do this:
 
 `client.end()` is useful for timeout cases where something is stuck or taking too long and you want 
 to start over.
+
+## Friendlier hash commands
+
+Most Redis commands take a single String or an Array of Strings as arguments, and replies are sent back as a single String or an Array of Strings.
+When dealing with hash values, there are a couple of useful exceptions to this.
+
+### client.hgetall(hash)
+
+The reply from an HGETALL command will be converted into a JavaScript Object by `node_redis`.  That way you can interact 
+with the responses using JavaScript syntax.
+
+Example:
+
+    client.hmset("hosts", "mjr", "1", "another", "23", "home", "1234");
+    client.hgetall("hosts", function (err, obj) {
+        console.dir(obj);
+    });
+
+Output:
+
+    { mjr: '1', another: '23', home: '1234' }
+
+### client.hmset(hash, obj, [callback])
+
+Multiple values in a hash can be set by supplying an object:
+
+    client.HMSET(key2, {
+        "0123456789": "abcdefghij",
+        "some manner of key": "a type of value"
+    });
+
+The properties and values of this Object will be set as keys and values in the Redis hash.
+
+### client.hmset(hash, key1, val1, ... keyn, valn, [callback])
+
+Multiple values may also be set by supplying a list:
+
+    client.HMSET(key1, "0123456789", "abcdefghij", "some manner of key", "a type of value");
+
 
 ## Publish / Subscribe
 
@@ -342,9 +419,44 @@ of commands and arguments to the constructor:
     });
 
 
+## Monitor mode
+
+Redis supports the `MONITOR` command, which lets you see all commands received by the Redis server
+across all client connections, including from other client libraries and other computers.
+
+After you send the `MONITOR` command, no other commands are valid on that connection.  `node_redis`
+will emit a `monitor` event for every new monitor message that comes across.  The callback for the 
+`monitor` event takes a timestamp from the Redis server and an array of command arguments.
+
+Here is a simple example:
+
+    var client  = require("redis").createClient(),
+        util = require("util");
+
+    client.monitor(function (err, res) {
+        console.log("Entering monitoring mode.");
+    });
+
+    client.on("monitor", function (time, args) {
+        console.log(time + ": " + util.inspect(args));
+    });
+
+
 # Extras
 
 Some other things you might like to know about.
+
+## client.server_info
+
+After the ready probe completes, the results from the INFO command are saved in the `client.server_info` 
+object.
+
+The `versions` key contains an array of the elements of the version string for easy comparison.
+
+    > client.server_info.redis_version
+    '2.3.0'
+    > client.server_info.versions
+    [ 2, 3, 0 ]
 
 ## redis.print()
 
@@ -430,6 +542,8 @@ Defaults to 1.7.  The default initial connection retry is 250, so the second ret
 
 ## TODO
 
+Better tests for auth, disconnect/reconnect, and all combinations thereof.
+
 Stream large set/get values into and out of Redis.  Otherwise the entire value must be in node's memory.
 
 Performance can be better for very large values.
@@ -442,14 +556,16 @@ Some people have have added features and fixed bugs in `node_redis` other than m
 
 In order of first contribution, they are:
 
-*  [Tim Smart](http://github.com/Tim-Smart)
-*  [TJ Holowaychuk](http://github.com/visionmedia)
-*  [Rick Olson](http://github.com/technoweenie)
-*  [Orion Henry](http://github.com/orionz)
-*  [Hank Sims](http://github.com/hanksims)
-*  [Aivo Paas](http://github.com/aivopaas)
+*  [Tim Smart](https://github.com/Tim-Smart)
+*  [TJ Holowaychuk](https://github.com/visionmedia)
+*  [Rick Olson](https://github.com/technoweenie)
+*  [Orion Henry](https://github.com/orionz)
+*  [Hank Sims](https://github.com/hanksims)
+*  [Aivo Paas](https://github.com/aivopaas)
 *  [Paul Carey](https://github.com/paulcarey)
 *  [Pieter Noordhuis](https://github.com/pietern)
+*  [Vladimir Dronnikov](https://github.com/dvv)
+*  [Dave Hoover](https://github.com/redsquirrel)
 
 Thanks.
 
