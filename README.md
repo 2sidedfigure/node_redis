@@ -1,36 +1,33 @@
-redis - a node redis client
+redis - a node.js redis client
 ===========================
 
-This is a Redis client for node.  It is designed for node 0.2.2+ and redis 2.0.1+.  It might not work on earlier versions of either,
-although it probably will.
+This is a complete Redis client for node.js.  It supports all Redis commands, including many recently added commands like EVAL from
+experimental Redis server branches.
 
-This client supports MULTI and PUBLISH/SUBSCRIBE.
 
 Install with:
 
     npm install redis
+    
+Pieter Noordhuis has provided a binding to the official `hiredis` C library, which is non-blocking and fast.  To use `hiredis`, do:
 
-## Why?
+    npm install hiredis redis
 
-`node_redis` works in the latest versions of node, is published in `npm`, and is very fast, particularly for small responses.
+If `hiredis` is installed, `node_redis` will use it by default.  Otherwise, a pure JavaScript parser will be used.
 
-The most popular Redis client, `redis-node-client` by fictorial, is very mature and well tested.  If you are running an older version
-of node or value the maturity and stability of `redis-node-client`, I encourage you to use that one instead.
-
-`node_redis` is designed with performance in mind.  The included `bench.js` runs similar tests to `redis-benchmark`, included with the Redis 
-distribution, and `bench.js` is as fast as `redis-benchmark` for some patterns and slower for others.  `node_redis` has many lovingly
-hand-crafted optimizations for speed.
+If you use `hiredis`, be sure to rebuild it whenever you upgrade your version of node.  There are mysterious failures that can
+happen between node and native code modules after a node upgrade.
 
 
 ## Usage
 
-Simple example, included as `example.js`:
+Simple example, included as `examples/simple.js`:
 
     var redis = require("redis"),
         client = redis.createClient();
 
     client.on("error", function (err) {
-        console.log("Redis connection error to " + client.host + ":" + client.port + " - " + err);
+        console.log("Error " + err);
     });
 
     client.set("string key", "string val", redis.print);
@@ -46,7 +43,7 @@ Simple example, included as `example.js`:
 
 This will display:
 
-    mjr:~/work/node_redis (master)$ node example.js 
+    mjr:~/work/node_redis (master)$ node example.js
     Reply: OK
     Reply: 0
     Reply: 0
@@ -54,6 +51,34 @@ This will display:
         0: hashtest 1
         1: hashtest 2
     mjr:~/work/node_redis (master)$ 
+
+
+## Performance
+
+Here are typical results of `multi_bench.js` which is similar to `redis-benchmark` from the Redis distribution.
+It uses 50 concurrent connections with no pipelining.
+
+JavaScript parser:
+
+    PING: 20000 ops 42283.30 ops/sec 0/5/1.182
+    SET: 20000 ops 32948.93 ops/sec 1/7/1.515
+    GET: 20000 ops 28694.40 ops/sec 0/9/1.740
+    INCR: 20000 ops 39370.08 ops/sec 0/8/1.269
+    LPUSH: 20000 ops 36429.87 ops/sec 0/8/1.370
+    LRANGE (10 elements): 20000 ops 9891.20 ops/sec 1/9/5.048
+    LRANGE (100 elements): 20000 ops 1384.56 ops/sec 10/91/36.072
+
+hiredis parser:
+
+    PING: 20000 ops 46189.38 ops/sec 1/4/1.082
+    SET: 20000 ops 41237.11 ops/sec 0/6/1.210
+    GET: 20000 ops 39682.54 ops/sec 1/7/1.257
+    INCR: 20000 ops 40080.16 ops/sec 0/8/1.242
+    LPUSH: 20000 ops 41152.26 ops/sec 0/3/1.212
+    LRANGE (10 elements): 20000 ops 36563.07 ops/sec 1/8/1.363
+    LRANGE (100 elements): 20000 ops 21834.06 ops/sec 0/9/2.287
+
+The performance of `node_redis` improves dramatically with pipelining, which happens automatically in most normal programs.
 
 
 ### Sending Commands
@@ -74,7 +99,7 @@ Note that in either form the `callback` is optional:
     client.set("some key", "some val");
     client.set(["some other key", "some val"]);
 
-For a list of Redis commands, see [Redis Command Reference](http://code.google.com/p/redis/wiki/CommandReference)
+For a list of Redis commands, see [Redis Command Reference](http://redis.io/commands)
 
 The commands can be specified in uppercase or lowercase for convenience.  `client.get()` is the same as `client.GET()`.
 
@@ -88,11 +113,17 @@ JavaScript Array of node Buffers.  `HGETALL` returns an Object with Buffers keye
 
 `client` will emit some events about the state of the connection to the Redis server.
 
+### "ready"
+
+`client` will emit `ready` a connection is established to the Redis server and the server reports 
+that it is ready to receive commands.  Commands issued before the `ready` event are queued, 
+then replayed just before this event is emitted.
+
 ### "connect"
 
-`client` will emit `connect` when a connection is established to the Redis server.
-
-Commands issued before the `connect` event are queued, then replayed when a connection is established.
+`client` will emit `connect` at the same time as it emits `ready` unless `client.options.no_ready_check`
+is set.  If this options is set, `connect` will be emitted when the stream is connected, and then
+you are free to try to send commands.
 
 ### "error"
 
@@ -114,17 +145,73 @@ cryptic error messages like this:
 Not very useful in diagnosing the problem, but if your program isn't ready to handle this,
 it is probably the right thing to just exit.
 
+`client` will also emit `error` if an exception is thrown inside of `node_redis` for whatever reason.
+It would be nice to distinguish these two cases.
+
 ### "end"
 
 `client` will emit `end` when an established Redis server connection has closed.
 
-## redis.createClient(port, host)
+### "drain"
+
+`client` will emit `drain` when the TCP connection to the Redis server has been buffering, but is now
+writable.  This event can be used to stream commands in to Redis and adapt to backpressure.  Right now,
+you need to check `client.command_queue.length` to decide when to reduce your send rate.  Then you can 
+resume sending when you get `drain`.
+
+### "idle"
+
+`client` will emit `idle` when there are no outstanding commands that are awaiting a response.
+
+## redis.createClient(port, host, options)
 
 Create a new client connection.  `port` defaults to `6379` and `host` defaults
-to `127.0.0.1`.  If you have Redis running on the same computer as node, then the defaults are probably fine.
+to `127.0.0.1`.  If you have `redis-server` running on the same computer as node, then the defaults for
+port and host are probably fine.  `options` in an object with the following possible properties:
 
-`createClient` returns a `RedisClient` object that is named `client` in all of the examples here.
+* `parser`: which Redis protocol reply parser to use.  Defaults to `hiredis` if that module is installed.
+This may also be set to `javascript`.
+* `return_buffers`: defaults to `false`.  If set to `true`, then all replies will be sent to callbacks as node Buffer
+objects instead of JavaScript Strings.
+* `detect_buffers`: default to `false`. If set to `true`, then replies will be sent to callbacks as node Buffer objects
+if any of the input arguments to the original command were Buffer objects.
+This option lets you switch between Buffers and Strings on a per-command basis, whereas `return_buffers` applies to
+every command on a client.
+* `socket_nodelay`: defaults to `true`. Whether to call setNoDelay() on the TCP stream, which disables the
+Nagle algorithm on the underlying socket.  Setting this option to `false` can result in additional throughput at the 
+cost of more latency.  Most applications will want this set to `true`.
+* `no_ready_check`: defaults to `false`. When a connection is established to the Redis server, the server might still
+be loading the database from disk.  While loading, the server not respond to any commands.  To work around this, 
+`node_redis` has a "ready check" which sends the `INFO` command to the server.  The response from the `INFO` command
+indicates whether the server is ready for more commands.  When ready, `node_redis` emits a `ready` event.
+Setting `no_ready_check` to `true` will inhibit this check.
 
+
+    var redis = require("redis"),
+        client = redis.createClient(null, null, {detect_buffers: true});
+
+    client.set("foo_rand000000000000", "OK");
+
+    // This will return a JavaScript String
+    client.get("foo_rand000000000000", function (err, reply) {
+        console.log(reply.toString()); // Will print `OK`
+    });
+
+    // This will return a Buffer since original key is specified as a Buffer
+    client.get(new Buffer("foo_rand000000000000"), function (err, reply) {
+        console.log(reply.toString()); // Will print `<Buffer 4f 4b>`
+    });
+    client.end();
+
+`createClient()` returns a `RedisClient` object that is named `client` in all of the examples here.
+
+## client.auth(password, callback)
+
+When connecting to Redis servers that require authentication, the `AUTH` command must be sent as the
+first command after connecting.  This can be tricky to coordinate with reconnections, the ready check,
+etc.  To make this easier, `client.auth()` stashes `password` and will send it after each connection,
+including reconnections.  `callback` is invoked only once, after the response to the very first
+`AUTH` command sent.
 
 ## client.end()
 
@@ -145,6 +232,45 @@ want to do this:
 
 `client.end()` is useful for timeout cases where something is stuck or taking too long and you want 
 to start over.
+
+## Friendlier hash commands
+
+Most Redis commands take a single String or an Array of Strings as arguments, and replies are sent back as a single String or an Array of Strings.
+When dealing with hash values, there are a couple of useful exceptions to this.
+
+### client.hgetall(hash)
+
+The reply from an HGETALL command will be converted into a JavaScript Object by `node_redis`.  That way you can interact 
+with the responses using JavaScript syntax.
+
+Example:
+
+    client.hmset("hosts", "mjr", "1", "another", "23", "home", "1234");
+    client.hgetall("hosts", function (err, obj) {
+        console.dir(obj);
+    });
+
+Output:
+
+    { mjr: '1', another: '23', home: '1234' }
+
+### client.hmset(hash, obj, [callback])
+
+Multiple values in a hash can be set by supplying an object:
+
+    client.HMSET(key2, {
+        "0123456789": "abcdefghij",
+        "some manner of key": "a type of value"
+    });
+
+The properties and values of this Object will be set as keys and values in the Redis hash.
+
+### client.hmset(hash, key1, val1, ... keyn, valn, [callback])
+
+Multiple values may also be set by supplying a list:
+
+    client.HMSET(key1, "0123456789", "abcdefghij", "some manner of key", "a type of value");
+
 
 ## Publish / Subscribe
 
@@ -249,11 +375,11 @@ Redis.  The interface in `node_redis` is to return an individual `Multi` object 
             });
         });
 
-`client.multi()` is a constructor that returns a `Multi` object.  `Multi` objects share all of the 
+`client.multi()` is a constructor that returns a `Multi` object.  `Multi` objects share all of the
 same command methods as `client` objects do.  Commands are queued up inside the `Multi` object
 until `Multi.exec()` is invoked.
 
-You can either chain together `MULTI` commands as in the above example, or you can queue individual 
+You can either chain together `MULTI` commands as in the above example, or you can queue individual
 commands while still sending regular client command as in this example:
 
     var redis  = require("redis"),
@@ -293,9 +419,44 @@ of commands and arguments to the constructor:
     });
 
 
+## Monitor mode
+
+Redis supports the `MONITOR` command, which lets you see all commands received by the Redis server
+across all client connections, including from other client libraries and other computers.
+
+After you send the `MONITOR` command, no other commands are valid on that connection.  `node_redis`
+will emit a `monitor` event for every new monitor message that comes across.  The callback for the 
+`monitor` event takes a timestamp from the Redis server and an array of command arguments.
+
+Here is a simple example:
+
+    var client  = require("redis").createClient(),
+        util = require("util");
+
+    client.monitor(function (err, res) {
+        console.log("Entering monitoring mode.");
+    });
+
+    client.on("monitor", function (time, args) {
+        console.log(time + ": " + util.inspect(args));
+    });
+
+
 # Extras
 
 Some other things you might like to know about.
+
+## client.server_info
+
+After the ready probe completes, the results from the INFO command are saved in the `client.server_info` 
+object.
+
+The `versions` key contains an array of the elements of the version string for easy comparison.
+
+    > client.server_info.redis_version
+    '2.3.0'
+    > client.server_info.versions
+    [ 2, 3, 0 ]
 
 ## redis.print()
 
@@ -381,21 +542,13 @@ Defaults to 1.7.  The default initial connection retry is 250, so the second ret
 
 ## TODO
 
-Need to add WATCH/UNWATCH.
+Better tests for auth, disconnect/reconnect, and all combinations thereof.
 
-Stream large set/get into and out of Redis.
+Stream large set/get values into and out of Redis.  Otherwise the entire value must be in node's memory.
 
-Performance can be better for large values.
+Performance can be better for very large values.
 
 I think there are more performance improvements left in there for smaller values, especially for large lists of small values.
-
-
-## Also
-
-This library might still have some bugs in it, but it seems to be quite useful for a lot of people at this point.
-There are other Redis libraries available for node, and they might work better for you.
-
-Comments and patches welcome.
 
 ## Contributors
 
@@ -403,10 +556,16 @@ Some people have have added features and fixed bugs in `node_redis` other than m
 
 In order of first contribution, they are:
 
-*  Tim Smart
-*  TJ Holowaychuk
-*  Rick Olson
-*  Orion Henry
+*  [Tim Smart](https://github.com/Tim-Smart)
+*  [TJ Holowaychuk](https://github.com/visionmedia)
+*  [Rick Olson](https://github.com/technoweenie)
+*  [Orion Henry](https://github.com/orionz)
+*  [Hank Sims](https://github.com/hanksims)
+*  [Aivo Paas](https://github.com/aivopaas)
+*  [Paul Carey](https://github.com/paulcarey)
+*  [Pieter Noordhuis](https://github.com/pietern)
+*  [Vladimir Dronnikov](https://github.com/dvv)
+*  [Dave Hoover](https://github.com/redsquirrel)
 
 Thanks.
 
@@ -434,3 +593,5 @@ HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
 WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
+
+![spacer](http://ranney.com/1px.gif)
