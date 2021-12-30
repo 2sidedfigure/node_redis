@@ -1,436 +1,341 @@
-redis - a node redis client
-===========================
+# Node-Redis
 
-This is a Redis client for node.  It is designed for node 0.2.2+ and redis 2.0.1+.  It might not work on earlier versions of either,
-although it probably will.
+[![Tests](https://img.shields.io/github/workflow/status/redis/node-redis/Tests/master.svg?label=tests)](https://github.com/redis/node-redis/actions/workflows/tests.yml)
+[![Coverage](https://codecov.io/gh/redis/node-redis/branch/master/graph/badge.svg?token=xcfqHhJC37)](https://codecov.io/gh/redis/node-redis)
+[![License](https://img.shields.io/github/license/redis/node-redis.svg)](https://github.com/redis/node-redis/blob/master/LICENSE)
+[![LGTM alerts](https://img.shields.io/lgtm/alerts/g/redis/node-redis.svg?logo=LGTM)](https://lgtm.com/projects/g/redis/node-redis/alerts)
+[![Chat](https://img.shields.io/discord/697882427875393627.svg)](https://discord.gg/redis)
 
-This client supports MULTI and PUBLISH/SUBSCRIBE.
+node-redis is a modern, high performance [Redis](https://redis.io) client for Node.js with built-in support for Redis 6.2 commands and modules including [RediSearch](https://redisearch.io) and [RedisJSON](https://redisjson.io).
 
-Install with:
+## Installation
 
-    npm install redis
+```bash
+npm install redis
+```
 
-## Why?
-
-`node_redis` works in the latest versions of node, is published in `npm`, and is very fast, particularly for small responses.
-
-The most popular Redis client, `redis-node-client` by fictorial, is very mature and well tested.  If you are running an older version
-of node or value the maturity and stability of `redis-node-client`, I encourage you to use that one instead.
-
-`node_redis` is designed with performance in mind.  The included `bench.js` runs similar tests to `redis-benchmark`, included with the Redis 
-distribution, and `bench.js` is as fast as `redis-benchmark` for some patterns and slower for others.  `node_redis` has many lovingly
-hand-crafted optimizations for speed.
-
+> :warning: The new interface is clean and cool, but if you have an existing codebase, you'll want to read the [migration guide](./docs/v3-to-v4.md).
 
 ## Usage
 
-Simple example, included as `example.js`:
+### Basic Example
 
-    var redis = require("redis"),
-        client = redis.createClient();
+```typescript
+import { createClient } from 'redis';
 
-    client.on("error", function (err) {
-        console.log("Redis connection error to " + client.host + ":" + client.port + " - " + err);
-    });
+(async () => {
+  const client = createClient();
 
-    client.set("string key", "string val", redis.print);
-    client.hset("hash key", "hashtest 1", "some value", redis.print);
-    client.hset(["hash key", "hashtest 2", "some other value"], redis.print);
-    client.hkeys("hash key", function (err, replies) {
-        console.log(replies.length + " replies:");
-        replies.forEach(function (reply, i) {
-            console.log("    " + i + ": " + reply);
-        });
-        client.quit();
-    });
+  client.on('error', (err) => console.log('Redis Client Error', err));
 
-This will display:
+  await client.connect();
 
-    mjr:~/work/node_redis (master)$ node example.js 
-    Reply: OK
-    Reply: 0
-    Reply: 0
-    2 replies:
-        0: hashtest 1
-        1: hashtest 2
-    mjr:~/work/node_redis (master)$ 
+  await client.set('key', 'value');
+  const value = await client.get('key');
+})();
+```
 
+The above code connects to localhost on port 6379. To connect to a different host or port, use a connection string in the format `redis[s]://[[username][:password]@][host][:port][/db-number]`:
 
-### Sending Commands
+```typescript
+createClient({
+  url: 'redis://alice:foobared@awesome.redis.server:6380'
+});
+```
 
-Each Redis command is exposed as a function on the `client` object.
-All functions take either take either an `args` Array plus optional `callback` Function or
-a variable number of individual arguments followed by an optional callback.
-Here is an example of passing an array of arguments and a callback:
+You can also use discrete parameters, UNIX sockets, and even TLS to connect. Details can be found in the [client configuration guide](./docs/client-configuration.md).
 
-    client.mset(["test keys 1", "test val 1", "test keys 2", "test val 2"], function (err, res) {});
+### Redis Commands
 
-Here is that same call in the second style:
+There is built-in support for all of the [out-of-the-box Redis commands](https://redis.io/commands). They are exposed using the raw Redis command names (`HSET`, `HGETALL`, etc.) and a friendlier camel-cased version (`hSet`, `hGetAll`, etc.):
 
-    client.mset("test keys 1", "test val 1", "test keys 2", "test val 2", function (err, res) {});
-    
-Note that in either form the `callback` is optional:
+```typescript
+// raw Redis commands
+await client.HSET('key', 'field', 'value');
+await client.HGETALL('key');
 
-    client.set("some key", "some val");
-    client.set(["some other key", "some val"]);
+// friendly JavaScript commands
+await client.hSet('key', 'field', 'value');
+await client.hGetAll('key');
+```
 
-For a list of Redis commands, see [Redis Command Reference](http://code.google.com/p/redis/wiki/CommandReference)
+Modifiers to commands are specified using a JavaScript object:
 
-The commands can be specified in uppercase or lowercase for convenience.  `client.get()` is the same as `client.GET()`.
+```typescript
+await client.set('key', 'value', {
+  EX: 10,
+  NX: true
+});
+```
 
-Minimal parsing is done on the replies.  Commands that return a single line reply return JavaScript Strings, 
-integer replies return JavaScript Numbers, "bulk" replies return node Buffers, and "multi bulk" replies return a 
-JavaScript Array of node Buffers.  `HGETALL` returns an Object with Buffers keyed by the hash keys.
+Replies will be transformed into useful data structures:
 
-# API
+```typescript
+await client.hGetAll('key'); // { field1: 'value1', field2: 'value2' }
+await client.hVals('key'); // ['value1', 'value2']
+```
 
-## Connection Events
+`Buffer`s are supported as well:
 
-`client` will emit some events about the state of the connection to the Redis server.
+```typescript
+await client.hSet('key', 'field', Buffer.from('value')); // 'OK'
+await client.hGetAll(
+  commandOptions({ returnBuffers: true }),
+  'key'
+); // { field: <Buffer 76 61 6c 75 65> }
+```
 
-### "connect"
+### Unsupported Redis Commands
 
-`client` will emit `connect` when a connection is established to the Redis server.
+If you want to run commands and/or use arguments that Node Redis doesn't know about (yet!) use `.sendCommand()`:
 
-Commands issued before the `connect` event are queued, then replayed when a connection is established.
+```typescript
+await client.sendCommand(['SET', 'key', 'value', 'NX']); // 'OK'
 
-### "error"
+await client.sendCommand(['HGETALL', 'key']); // ['key1', 'field1', 'key2', 'field2']
+```
 
-`client` will emit `error` when encountering an error connecting to the Redis server.
+### Transactions (Multi/Exec)
 
-Note that "error" is a special event type in node.  If there are no listeners for an 
-"error" event, node will exit.  This is usually what you want, but it can lead to some 
-cryptic error messages like this:
+Start a [transaction](https://redis.io/topics/transactions) by calling `.multi()`, then chaining your commands. When you're done, call `.exec()` and you'll get an array back with your results:
 
-    mjr:~/work/node_redis (master)$ node example.js 
+```typescript
+await client.set('another-key', 'another-value');
 
-    node.js:50
-        throw e;
-        ^
-    Error: ECONNREFUSED, Connection refused
-        at IOWatcher.callback (net:870:22)
-        at node.js:607:9
+const [setKeyReply, otherKeyValue] = await client
+  .multi()
+  .set('key', 'value')
+  .get('another-key')
+  .exec(); // ['OK', 'another-value']
+```
 
-Not very useful in diagnosing the problem, but if your program isn't ready to handle this,
-it is probably the right thing to just exit.
+You can also [watch](https://redis.io/topics/transactions#optimistic-locking-using-check-and-set) keys by calling `.watch()`. Your transaction will abort if any of the watched keys change.
 
-### "end"
+To dig deeper into transactions, check out the [Isolated Execution Guide](./docs/isolated-execution.md).
 
-`client` will emit `end` when an established Redis server connection has closed.
+### Blocking Commands
 
-## redis.createClient(port, host)
+Any command can be run on a new connection by specifying the `isolated` option. The newly created connection is closed when the command's `Promise` is fulfilled.
 
-Create a new client connection.  `port` defaults to `6379` and `host` defaults
-to `127.0.0.1`.  If you have Redis running on the same computer as node, then the defaults are probably fine.
+This pattern works especially well for blocking commands—such as `BLPOP` and `BLMOVE`:
 
-`createClient` returns a `RedisClient` object that is named `client` in all of the examples here.
+```typescript
+import { commandOptions } from 'redis';
 
+const blPopPromise = client.blPop(
+  commandOptions({ isolated: true }),
+  'key',
+  0
+);
 
-## client.end()
+await client.lPush('key', ['1', '2']);
 
-Forcibly close the connection to the Redis server.  Note that this does not wait until all replies have been parsed.
-If you want to exit cleanly, call `client.quit()` to send the `QUIT` command after you have handled all replies.
+await blPopPromise; // '2'
+```
 
-This example closes the connection to the Redis server before the replies have been read.  You probably don't 
-want to do this:
+To learn more about isolated execution, check out the [guide](./docs/isolated-execution.md).
 
-    var redis = require("redis"),
-        client = redis.createClient();
+### Pub/Sub
 
-    client.set("foo_rand000000000000", "some fantastic value");
-    client.get("foo_rand000000000000", function (err, reply) {
-        console.log(reply.toString());
-    });
-    client.end();
+Subscribing to a channel requires a dedicated stand-alone connection. You can easily get one by `.duplicate()`ing an existing Redis connection.
 
-`client.end()` is useful for timeout cases where something is stuck or taking too long and you want 
-to start over.
+```typescript
+const subscriber = client.duplicate();
 
-## Publish / Subscribe
+await subscriber.connect();
+```
 
-Here is a simple example of the API for publish / subscribe.  This program opens two
-client connections, subscribes to a channel on one of them, and publishes to that 
-channel on the other:
+Once you have one, simply subscribe and unsubscribe as needed:
 
-    var redis = require("redis"),
-        client1 = redis.createClient(), client2 = redis.createClient(),
-        msg_count = 0;
+```typescript
+await subscriber.subscribe('channel', (message) => {
+  console.log(message); // 'message'
+});
 
-    client1.on("subscribe", function (channel, count) {
-        client2.publish("a nice channel", "I am sending a message.");
-        client2.publish("a nice channel", "I am sending a second message.");
-        client2.publish("a nice channel", "I am sending my last message.");
-    });
+await subscriber.pSubscribe('channe*', (message, channel) => {
+  console.log(message, channel); // 'message', 'channel'
+});
 
-    client1.on("message", function (channel, message) {
-        console.log("client1 channel " + channel + ": " + message);
-        msg_count += 1;
-        if (msg_count === 3) {
-            client1.unsubscribe();
-            client1.end();
-            client2.end();
+await subscriber.unsubscribe('channel');
+
+await subscriber.pUnsubscribe('channe*');
+```
+
+Publish a message on a channel:
+
+```typescript
+await publisher.publish('channel', 'message');
+```
+
+There is support for buffers as well:
+
+```typescript
+await subscriber.subscribe('channel', (message) => {
+  console.log(message); // <Buffer 6d 65 73 73 61 67 65>
+}, true);
+
+await subscriber.pSubscribe('channe*', (message, channel) => {
+  console.log(message, channel); // <Buffer 6d 65 73 73 61 67 65>, <Buffer 63 68 61 6e 6e 65 6c>
+}, true);
+```
+
+### Scan Iterator
+
+[`SCAN`](https://redis.io/commands/scan) results can be looped over using [async iterators](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/asyncIterator):
+
+```typescript
+for await (const key of client.scanIterator()) {
+  // use the key!
+  await client.get(key);
+}
+```
+
+This works with `HSCAN`, `SSCAN`, and `ZSCAN` too:
+
+```typescript
+for await (const { field, value } of client.hScanIterator('hash')) {}
+for await (const member of client.sScanIterator('set')) {}
+for await (const { score, value } of client.zScanIterator('sorted-set')) {}
+```
+
+You can override the default options by providing a configuration object:
+
+```typescript
+client.scanIterator({
+  TYPE: 'string', // `SCAN` only
+  MATCH: 'patter*',
+  COUNT: 100
+});
+```
+
+### Lua Scripts
+
+Define new functions using [Lua scripts](https://redis.io/commands/eval) which execute on the Redis server:
+
+```typescript
+import { createClient, defineScript } from 'redis';
+
+(async () => {
+  const client = createClient({
+    scripts: {
+      add: defineScript({
+        NUMBER_OF_KEYS: 1,
+        SCRIPT:
+          'local val = redis.pcall("GET", KEYS[1]);' +
+          'return val + ARGV[1];',
+        transformArguments(key: string, toAdd: number): Array<string> {
+          return [key, toAdd.toString()];
+        },
+        transformReply(reply: number): number {
+          return reply;
         }
-    });
-
-    client1.incr("did a thing");
-    client1.subscribe("a nice channel");
-
-When a client issues a `SUBSCRIBE` or `PSUBSCRIBE`, that connection is put into "pub/sub" mode.
-At that point, only commands that modify the subscription set are valid.  When the subscription 
-set is empty, the connection is put back into regular mode.
-
-If you need to send regular commands to Redis while in pub/sub mode, just open another connection.
-
-## Pub / Sub Events
-
-If a client has subscriptions active, it may emit these events:
-
-### "message" (channel, message)
-
-Client will emit `message` for every message received that matches an active subscription.
-Listeners are passed the channel name as `channel` and the message Buffer as `message`.
-
-### "pmessage" (pattern, channel, message)
-
-Client will emit `pmessage` for every message received that matches an active subscription pattern.
-Listeners are passed the original pattern used with `PSUBSCRIBE` as `pattern`, the sending channel
-name as `channel`, and the message Buffer as `message`.
-
-### "subscribe" (channel, count)
-
-Client will emit `subscribe` in response to a `SUBSCRIBE` command.  Listeners are passed the 
-channel name as `channel` and the new count of subscriptions for this client as `count`.
-
-### "psubscribe" (pattern, count) 
-
-Client will emit `psubscribe` in response to a `PSUBSCRIBE` command.  Listeners are passed the
-original pattern as `pattern`, and the new count of subscriptions for this client as `count`.
-
-### "unsubscribe" (channel, count)
-
-Client will emit `unsubscribe` in response to a `UNSUBSCRIBE` command.  Listeners are passed the 
-channel name as `channel` and the new count of subscriptions for this client as `count`.  When
-`count` is 0, this client has left pub/sub mode and no more pub/sub events will be emitted.
-
-### "punsubscribe" (pattern, count)
-
-Client will emit `punsubscribe` in response to a `PUNSUBSCRIBE` command.  Listeners are passed the 
-channel name as `channel` and the new count of subscriptions for this client as `count`.  When
-`count` is 0, this client has left pub/sub mode and no more pub/sub events will be emitted.
-
-## client.multi([commands])
-
-`MULTI` commands are queued up until an `EXEC` is issued, and then all commands are run atomically by
-Redis.  The interface in `node_redis` is to return an individual `Multi` object by calling `client.multi()`.
-
-    var redis  = require("./index"),
-        client = redis.createClient(), set_size = 20;
-
-    client.sadd("bigset", "a member");
-    client.sadd("bigset", "another member");
-
-    while (set_size > 0) {
-        client.sadd("bigset", "member " + set_size);
-        set_size -= 1;
+      })
     }
+  });
 
-    // multi chain with an individual callback
-    client.multi()
-        .scard("bigset")
-        .smembers("bigset")
-        .keys("*", function (err, replies) {
-            client.mget(replies, redis.print);
-        })
-        .dbsize()
-        .exec(function (err, replies) {
-            console.log("MULTI got " + replies.length + " replies");
-            replies.forEach(function (reply, index) {
-                console.log("Reply " + index + ": " + reply.toString());
-            });
-        });
+  await client.connect();
 
-`client.multi()` is a constructor that returns a `Multi` object.  `Multi` objects share all of the 
-same command methods as `client` objects do.  Commands are queued up inside the `Multi` object
-until `Multi.exec()` is invoked.
+  await client.set('key', '1');
+  await client.add('key', 2); // 3
+})();
+```
 
-You can either chain together `MULTI` commands as in the above example, or you can queue individual 
-commands while still sending regular client command as in this example:
+### Disconnecting
 
-    var redis  = require("redis"),
-        client = redis.createClient(), multi;
+There are two functions that disconnect a client from the Redis server. In most scenarios you should use `.quit()` to ensure that pending commands are sent to Redis before closing a connection.
 
-    // start a separate multi command queue 
-    multi = client.multi();
-    multi.incr("incr thing", redis.print);
-    multi.incr("incr other thing", redis.print);
+#### `.QUIT()`/`.quit()`
 
-    // runs immediately
-    client.mset("incr thing", 100, "incr other thing", 1, redis.print);
+Gracefully close a client's connection to Redis, by sending the [`QUIT`](https://redis.io/commands/quit) command to the server. Before quitting, the client executes any remaining commands in its queue, and will receive replies from Redis for each of them.
 
-    // drains multi queue and runs atomically
-    multi.exec(function (err, replies) {
-        console.log(replies); // 101, 2
-    });
+```typescript
+const [ping, get, quit] = await Promise.all([
+  client.ping(),
+  client.get('key'),
+  client.quit()
+]); // ['PONG', null, 'OK']
 
-    // you can re-run the same transaction if you like
-    multi.exec(function (err, replies) {
-        console.log(replies); // 102, 3
-        client.quit();
-    });
+try {
+  await client.get('key');
+} catch (err) {
+  // ClosedClient Error
+}
+```
 
-In addition to adding commands to the `MULTI` queue individually, you can also pass an array 
-of commands and arguments to the constructor:
+#### `.disconnect()`
 
-    var redis  = require("redis"),
-        client = redis.createClient(), multi;
+Forcibly close a client's connection to Redis immediately. Calling `disconnect` will not send further pending commands to the Redis server, or wait for or parse outstanding responses.
 
-    client.multi([
-        ["mget", "multifoo", "multibar", redis.print],
-        ["incr", "multifoo"],
-        ["incr", "multibar"]
-    ]).exec(function (err, replies) {
-        console.log(replies);
-    });
+```typescript
+await client.disconnect();
+```
 
+### Auto-Pipelining
 
-# Extras
+Node Redis will automatically pipeline requests that are made during the same "tick".
 
-Some other things you might like to know about.
+```typescript
+client.set('Tm9kZSBSZWRpcw==', 'users:1');
+client.sAdd('users:1:tokens', 'Tm9kZSBSZWRpcw==');
+```
 
-## redis.print()
+Of course, if you don't do something with your Promises you're certain to get [unhandled Promise exceptions](https://nodejs.org/api/process.html#process_event_unhandledrejection). To take advantage of auto-pipelining and handle your Promises, use `Promise.all()`.
 
-A handy callback function for displaying return values when testing.  Example:
+```typescript
+await Promise.all([
+  client.set('Tm9kZSBSZWRpcw==', 'users:1'),
+  client.sAdd('users:1:tokens', 'Tm9kZSBSZWRpcw==')
+]);
+```
 
-    var redis = require("redis"),
-        client = redis.createClient();
+### Clustering
 
-    client.on("connect", function () {
-        client.set("foo_rand000000000000", "some fantastic value", redis.print);
-        client.get("foo_rand000000000000", redis.print);
-    });
+Check out the [Clustering Guide](./docs/clustering.md) when using Node Redis to connect to a Redis Cluster.
 
-This will print:
+### Events
 
-    Reply: OK
-    Reply: some fantastic value
+The Node Redis client class is an Nodejs EventEmitter and it emits an event each time the network status changes:
 
-Note that this program will not exit cleanly because the client is still connected.
+| Event name   | Scenes                                                                                                            | Parameters                                                                                                                         |
+|--------------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| connect      | The client is initiating a connection to the server.                                                              | _undefined_                                                                                                                        |
+| ready        | The client successfully initiated the connection to the server.                                                   | _undefined_                                                                                                                        |
+| end          | The client disconnected the connection to the server via `.quit()` or `.disconnect()`.                            | _undefined_                                                                                                                        |
+| error        | When a network error has occurred, such as unable to connect to the server or the connection closed unexpectedly. | The error object, such as `SocketClosedUnexpectedlyError: Socket closed unexpectedly` or `Error: connect ECONNREFUSED [IP]:[PORT]` |
+| reconnecting | The client is trying to reconnect to the server.                                                                  | _undefined_                                                                                                                        |
 
-## redis.debug_mode
+The client will not emit any other events beyond those listed above.
 
-Boolean to enable debug mode and protocol tracing.
+## Supported Redis versions
 
-    var redis = require("redis"),
-        client = redis.createClient();
+Node Redis is supported with the following versions of Redis:
 
-    redis.debug_mode = true;
+| Version | Supported          |
+|---------|--------------------|
+| 6.2.z   | :heavy_check_mark: |
+| 6.0.z   | :heavy_check_mark: |
+| 5.y.z   | :heavy_check_mark: |
+| < 5.0   | :x:                |
 
-    client.on("connect", function () {
-        client.set("foo_rand000000000000", "some fantastic value");
-    });
+> Node Redis should work with older versions of Redis, but it is not fully tested and we cannot offer support.
 
-This will display:
+| Name                                              | Description                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|---------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [redis](./)                                       | [![Downloads](https://img.shields.io/npm/dm/redis.svg)](https://www.npmjs.com/package/redis) [![Version](https://img.shields.io/npm/v/redis.svg)](https://www.npmjs.com/package/redis)                                                                                                                                                                                                                                                             |
+| [@node-redis/client](./packages/client)           | [![Downloads](https://img.shields.io/npm/dm/@node-redis/client.svg)](https://www.npmjs.com/package/@node-redis/client) [![Version](https://img.shields.io/npm/v/@node-redis/client.svg)](https://www.npmjs.com/package/@node-redis/client) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/client/)                                                                                               |
+| [@node-redis/bloom](./packages/bloom)             | [![Downloads](https://img.shields.io/npm/dm/@node-redis/bloom.svg)](https://www.npmjs.com/package/@node-redis/bloom) [![Version](https://img.shields.io/npm/v/@node-redis/bloom.svg)](https://www.npmjs.com/package/@node-redis/bloom) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/bloom/) [Redis Bloom](https://oss.redis.com/redisbloom/) commands                                          |
+| [@node-redis/json](./packages/json)               | [![Downloads](https://img.shields.io/npm/dm/@node-redis/json.svg)](https://www.npmjs.com/package/@node-redis/json) [![Version](https://img.shields.io/npm/v/@node-redis/json.svg)](https://www.npmjs.com/package/@node-redis/json) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/json/) [Redis JSON](https://oss.redis.com/redisjson/) commands                                                 |
+| [@node-redis/search](./packages/search)           | [![Downloads](https://img.shields.io/npm/dm/@node-redis/search.svg)](https://www.npmjs.com/package/@node-redis/search) [![Version](https://img.shields.io/npm/v/@node-redis/search.svg)](https://www.npmjs.com/package/@node-redis/search) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/search/) [Redis Search](https://oss.redis.com/redisearch/) commands                                    |
+| [@node-redis/time-series](./packages/time-series) | [![Downloads](https://img.shields.io/npm/dm/@node-redis/time-series.svg)](https://www.npmjs.com/package/@node-redis/time-series) [![Version](https://img.shields.io/npm/v/@node-redis/time-series.svg)](https://www.npmjs.com/package/@node-redis/time-series) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/time-series/) [Redis Time-Series](https://oss.redis.com/redistimeseries/) commands |
 
-    mjr:~/work/node_redis (master)$ node ~/example.js 
-    send command: *3
-    $3
-    SET
-    $20
-    foo_rand000000000000
-    $20
-    some fantastic value
+## Contributing
 
-    on_data: +OK
+If you'd like to contribute, check out the [contributing guide](CONTRIBUTING.md).
 
-`send command` is data sent into Redis and `on_data` is data received from Redis.
+Thank you to all the people who already contributed to Node Redis!
 
-## client.send_command(command_name, args, callback)
+[![Contributors](https://contrib.rocks/image?repo=redis/node-redis)](https://github.com/redis/node-redis/graphs/contributors)
 
-Used internally to send commands to Redis.  For convenience, nearly all commands that are published on the Redis 
-Wiki have been added to the `client` object.  However, if I missed any, or if new commands are introduced before
-this library is updated, you can use `send_command()` to send arbitrary commands to Redis.
+## License
 
-All commands are sent as multi-bulk commands.  `args` can either be an Array of arguments, or individual arguments,
-or omitted completely.
-
-## client.connected
-
-Boolean tracking the state of the connection to the Redis server.
-
-## client.command_queue.length
-
-The number of commands that have been sent to the Redis server but not yet replied to.  You can use this to 
-enforce some kind of maximum queue depth for commands while connected.
-
-Don't mess with `client.command_queue` though unless you really know what you are doing.
-
-## client.offline_queue.length
-
-The number of commands that have been queued up for a future connection.  You can use this to enforce
-some kind of maximum queue depth for pre-connection commands.
-
-## client.retry_delay
-
-Current delay in milliseconds before a connection retry will be attempted.  This starts at `250`.
-
-## client.retry_backoff
-
-Multiplier for future retry timeouts.  This should be larger than 1 to add more time between retries.
-Defaults to 1.7.  The default initial connection retry is 250, so the second retry will be 425, followed by 723.5, etc.
-
-
-## TODO
-
-Need to add WATCH/UNWATCH.
-
-Stream large set/get into and out of Redis.
-
-Performance can be better for large values.
-
-I think there are more performance improvements left in there for smaller values, especially for large lists of small values.
-
-
-## Also
-
-This library might still have some bugs in it, but it seems to be quite useful for a lot of people at this point.
-There are other Redis libraries available for node, and they might work better for you.
-
-Comments and patches welcome.
-
-## Contributors
-
-Some people have have added features and fixed bugs in `node_redis` other than me.
-
-In order of first contribution, they are:
-
-*  Tim Smart
-*  TJ Holowaychuk
-*  Rick Olson
-*  Orion Henry
-
-Thanks.
-
-## LICENSE - "MIT License"
-
-Copyright (c) 2010 Matthew Ranney, http://ranney.com/
-
-Permission is hereby granted, free of charge, to any person
-obtaining a copy of this software and associated documentation
-files (the "Software"), to deal in the Software without
-restriction, including without limitation the rights to use,
-copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the
-Software is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
+This repository is licensed under the "MIT" license. See [LICENSE](LICENSE).
